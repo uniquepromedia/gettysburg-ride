@@ -3,7 +3,7 @@
    hang on weak signal near the Round Tops. A new deploy changes VERSION, the
    browser installs this again, and the next load gets the new page.
    VERSION is the SHA-1 of the page this worker belongs to. */
-const VERSION = "ride-4d38d488041e";
+const VERSION = "ride-50696ea4a255";
 /* Named by scope, so another park published beside this one keeps its copy. */
 const PREFIX = "ride " + self.registration.scope + " ";
 const CACHE = PREFIX + VERSION;
@@ -11,14 +11,18 @@ async function fetchThisBuild(url) {
   /* Skip the HTTP cache: GitHub Pages sends max-age=600, so a page fetched
      in the last ten minutes is the previous build. Give up after 30 seconds
      on weak signal, so a stalled update does not block the next one. */
-  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 30000);
-  try {
+  const ctl = new AbortController();
+  let timer;
+  /* WebKit ignores a late abort, so race a timer as well. */
+  const giveUp = new Promise((_, no) => { timer = setTimeout(() => { ctl.abort(); no(new Error("timeout")); }, 15000); });
+  const work = (async () => {
     const res = await fetch(new Request(url, { cache: "no-cache", signal: ctl.signal }));
     if (!res.ok) return null;
     const sum = await crypto.subtle.digest("SHA-1", await res.clone().arrayBuffer());
     const hex = Array.from(new Uint8Array(sum), b => b.toString(16).padStart(2, "0")).join("");
     return "ride-" + hex.slice(0, 12) === VERSION ? res : null;
-  } finally { clearTimeout(timer); }
+  })();
+  try { return await Promise.race([work, giveUp]); } finally { clearTimeout(timer); }
 }
 self.addEventListener("install", e => {
   e.waitUntil((async () => {
@@ -41,7 +45,10 @@ self.addEventListener("activate", e => {
 });
 self.addEventListener("fetch", e => {
   if (e.request.mode !== "navigate") return;
-  /* One page: every open gets the verified copy, whatever the URL. */
+  /* The ride page only: other files beside it, such as verify.html on a
+     local test server, go to the network. */
+  const path = new URL(e.request.url).pathname, scope = new URL(self.registration.scope).pathname;
+  if (![scope, scope + "index.html", scope + "ride.html"].includes(path)) return;
   e.respondWith(caches.open(CACHE).then(async c => {
     const hit = await c.match("./");
     return hit || fetch(e.request);
