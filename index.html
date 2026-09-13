@@ -38,7 +38,7 @@ body{
   letter-spacing:.02em;color:var(--ink);opacity:.65;z-index:2}
 
 /* maneuver ------------------------------------------------------------- */
-#man{flex:1 1 auto;display:flex;flex-direction:column;justify-content:center;
+#man{flex:1 1 auto;display:flex;flex-direction:column;justify-content:safe center;
   align-items:center;padding:8px 20px;min-height:0}
 #arrow{width:132px;height:132px;flex:0 0 auto;color:var(--bronze)}
 #arrow svg{width:100%;height:100%;display:block}
@@ -65,7 +65,7 @@ body{
 
 /* footer --------------------------------------------------------------- */
 #foot{flex:0 0 auto;display:flex;justify-content:space-between;align-items:center;
-  padding:9px 20px calc(9px + env(safe-area-inset-bottom));
+  padding:9px 20px;
   border-top:1px solid var(--rule);font-size:13px;color:var(--quiet)}
 #foot b{color:var(--ink);font-weight:700}
 
@@ -80,7 +80,10 @@ body{
   font:inherit;font-size:19px;font-weight:700;padding:17px 42px;border-radius:2px;
   cursor:pointer}
 #go:active{background:var(--ink)}
-#go:focus-visible{outline:3px solid var(--union);outline-offset:3px}
+#go:focus-visible,#alt:focus-visible{outline:3px solid var(--union);outline-offset:3px}
+#alt{margin-top:14px;background:none;border:0;font:inherit;font-size:16px;
+  font-weight:600;color:var(--bronze);padding:12px 20px;cursor:pointer;
+  text-decoration:underline;text-underline-offset:3px}
 #err{margin-top:18px;color:var(--alarm);font-size:14px;font-weight:600;
   max-width:34ch;line-height:1.45}
 
@@ -92,6 +95,14 @@ body.weak #dist{opacity:.4}
   background:var(--quiet)}
 #gps.good{background:var(--union)}
 #gps.bad{background:var(--alarm)}
+/* A sideways mount or an unlocked rotation. Keep the maneuver on screen. */
+@media (max-height:500px){
+  #arrow{width:72px;height:72px}
+  #dist{font-size:clamp(40px,14vh,64px)}
+  #road{font-size:20px;margin-top:4px;max-width:none}
+  #then{margin-top:4px}
+  #shapewrap{min-height:0}
+}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -112,9 +123,10 @@ body.weak #dist{opacity:.4}
 
 <div id="veil">
   <h1>Gettysburg Auto Tour by Bike</h1>
-  <p>27.62 miles, 16 stops. Voice guidance starts when you do.
+  <p id="lede">27.62 miles, 16 stops. Voice guidance starts when you do.
      Mount the phone, then tap below.</p>
   <button id="go">Start the ride</button>
+  <button id="alt" hidden>Start over</button>
   <div id="err"></div>
 </div>
 
@@ -237,18 +249,58 @@ function heading(now) {
 }
 
 /* ---- speech ----------------------------------------------------------- */
-let voiceReady = false;
+let voiceReady = false, busySince = 0;
 function say(text) {
   if (!voiceReady || !("speechSynthesis" in window)) return;
+  const ss = speechSynthesis, t = Date.now();
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 1.02; u.pitch = 1; u.volume = 1; u.lang = "en-US";
-  speechSynthesis.speak(u);
+  /* A cue lasts a few seconds. An engine paused by the system, or busy for
+     20 seconds, lost its end event, and every later cue would queue behind
+     it for the rest of the ride. Clear it so this cue plays. Speaking in the
+     same tick as cancel() is dropped by some engines. */
+  if (ss.speaking || ss.pending || ss.paused) {
+    if (ss.paused || t - busySince > 20000) {
+      ss.cancel(); busySince = t;
+      setTimeout(() => ss.speak(u), 250);
+      return;
+    }
+  } else busySince = t;
+  ss.speak(u);
 }
 
 /* ---- state ------------------------------------------------------------ */
-const S = { s: null, hi: null, ci: 0, offCount: 0, lastT: null, trail: [], off: false, started: false, watch: null };
+const S = { s: null, hi: null, ci: 0, offCount: 0, lastT: null, trail: [], off: false,
+            started: false, startedAt: 0, watch: null, resumed: false, toldStart: false,
+            lastFixT: null, lastCb: 0, lastGood: 0, badAcc: 0, warnedApprox: false,
+            savedCi: -1, savedAt: 0 };
 const $ = id => document.getElementById(id);
 const mi = m => m / 1609.34;
+const GEO_OPTS = { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 };
+
+/* ---- saved progress ---------------------------------------------------- */
+/* iOS reloads a tab it evicted in the background, for example after using
+   the Camera at a stop. Progress lived only in memory, and a fresh page only
+   searches the first 500m, so the rest of the ride read Off route. Keyed on
+   the route so a record from a different build is never resumed. */
+const SAVE_KEY = `ride:${Math.round(TOTAL)}:${CUES.length}`;
+function saveProgress(force) {
+  if (S.hi === null) return;
+  const t = Date.now();
+  if (!force && S.ci === S.savedCi && t - S.savedAt < 5000) return;
+  S.savedCi = S.ci; S.savedAt = t;
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify({ hi: S.hi, ci: S.ci, t })); } catch (e) {}
+}
+function loadProgress() {
+  try {
+    const r = JSON.parse(localStorage.getItem(SAVE_KEY));
+    if (r && Number.isFinite(r.hi) && Number.isInteger(r.ci) && Number.isFinite(r.t) &&
+        Date.now() - r.t < 12 * 3600e3 && r.hi > 200 && r.hi < TOTAL &&
+        r.ci >= 0 && r.ci < CUES.length) return r;
+  } catch (e) {}
+  return null;
+}
+function clearProgress() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
 
 function fmtDist(m) {
   if (m < 160) return [String(Math.max(0, Math.round(m / 10) * 10)), "ft*"];
@@ -269,6 +321,7 @@ function nextStopAfter(s) {
 function render() {
   const cue = CUES[S.ci];
   if (!cue) {
+    clearProgress();
     setArrow("finish");
     $("dist").innerHTML = "0.0<small>mi</small>";
     $("road").textContent = "Back at the parking lot";
@@ -408,20 +461,40 @@ function updateDays() {
 /* ---- gps -------------------------------------------------------------- */
 function onFix(pos) {
   const { latitude: la, longitude: lo, accuracy: acc } = pos.coords;
+  const wall = Date.now();
+  S.lastCb = wall;
+  const now = typeof pos.timestamp === "number" ? pos.timestamp : wall;
+  /* Duplicate deliveries and bursts faster than 1 Hz. The matcher was
+     tuned and simulated at 1 Hz. */
+  if (S.lastFixT !== null && now >= S.lastFixT && now - S.lastFixT < 900) return;
+  S.lastFixT = now;
   const dot = $("gps");
   if (acc > CFG.max_gps_accuracy_m) {
-    dot.className = "bad"; document.body.classList.add("weak"); return;
+    S.badAcc = acc;
+    dot.className = "bad"; document.body.classList.add("weak");
+    if (S.hi === null && !S.warnedApprox) {
+      $("road").textContent = "Finding your position";
+      $("then").textContent = `GPS accurate to ${Math.round(acc)} m`;
+    }
+    return;
   }
+  S.lastGood = wall; S.badAcc = 0;
   dot.className = "good"; document.body.classList.remove("weak");
 
   const px = (lo - REF[1]) * KX, py = (la - REF[0]) * KY;
-  const now = typeof pos.timestamp === "number" ? pos.timestamp : Date.now();
   S.trail = S.trail.filter(e => e[0] <= now && now - e[0] <= 9000);
   S.trail.push([now, px, py]);
   /* Time since the last good match, so a GPS gap under tree cover widens
      the search by exactly as far as the rider could have gone. */
   const dt = S.lastT === null ? 1 : Math.max(1, (now - S.lastT) / 1000);
   const m = match(px, py, S.hi, dt, heading(now));
+  if (m.d > CFG.off_route_m && S.hi === null) {
+    /* Not on the route yet: parked across the lot, or still driving in.
+       Nothing has been matched, so this is not off route, and telling the
+       family to turn around would be wrong. */
+    showToStart(m.d);
+    return;
+  }
   if (m.d > CFG.off_route_m) {
     S.offCount++;
     if (S.offCount >= CFG.off_route_fixes && !S.off) {
@@ -431,6 +504,7 @@ function onFix(pos) {
     }
   } else {
     if (S.off) { S.off = false; document.body.classList.remove("off"); say("Back on route"); }
+    const first = S.hi === null;
     S.offCount = 0; S.lastT = now;
     /* One fix cannot carry the rider further than they could ride. Caps a
        GPS outlier that would otherwise jump past a cue and skip it. */
@@ -438,40 +512,101 @@ function onFix(pos) {
     /* A match behind the normal window only happens after a gap or an
        off route stretch, where the rider really did rejoin further back. */
     if (S.hi === null || S.s > S.hi || S.s < S.hi - CFG.match_slack_m) S.hi = S.s;
+    if (first && S.s < 150) say(firstDirection());
   }
-  if (!S.off) { announce(); render(); updateDays(); }
+  if (!S.off) { announce(); render(); updateDays(); saveProgress(false); }
+}
+function showToStart(d) {
+  setArrow("stop");
+  setDist(d);
+  $("road").textContent = "Ride to the start";
+  $("then").textContent = "Guidance begins when you reach the route";
+  $("stopname").textContent = NAV.start.name;
+  $("stopdist").textContent = mi(d).toFixed(1) + " mi";
+  if (!S.toldStart) { S.toldStart = true; say("Head to the start. Guidance begins there."); }
 }
 function onGpsError(e) {
-  $("err").textContent = e.code === 1
-    ? "Location permission was denied. Enable it for this site in your browser settings, then reload."
-    : "Cannot get a location fix. Step outside and try again.";
+  S.lastCb = Date.now();
+  if (e.code !== 1) {
+    /* Codes 2 and 3 are temporary under trees. The watch keeps running and
+       the next good fix clears this. Never cover navigation for them. */
+    $("gps").className = "bad"; document.body.classList.add("weak");
+    return;
+  }
+  /* Denied, or an Android one time grant that expired at a stop. This page
+     cannot ask again, so the way back is a reload, which offers to resume
+     from saved progress. */
+  if (S.watch !== null) { navigator.geolocation.clearWatch(S.watch); S.watch = null; }
+  saveProgress(true);
+  if (S.hi !== null) say("Location stopped");
+  $("err").textContent = "Location is blocked for this page. Tap Try again and choose Allow. " +
+    "If no prompt appears, allow location for this browser in Settings.";
+  $("lede").textContent = "Guidance is paused until location is allowed again.";
+  $("go").textContent = "Try again";
+  $("alt").hidden = true;
+  goAction = () => location.reload();
   $("veil").style.display = "flex";
+}
+/* Catches a location feed that stops without an error, and a phone that only
+   has approximate location. Uses wall time, never fix timestamps, because
+   cached fixes carry old ones. */
+function watchdog() {
+  if (document.visibilityState !== "visible") return;
+  const t = Date.now();
+  if (t - S.lastGood > 10000) { $("gps").className = "bad"; document.body.classList.add("weak"); }
+  if (S.watch !== null && t - S.lastCb > 30000) {
+    navigator.geolocation.clearWatch(S.watch);
+    S.watch = navigator.geolocation.watchPosition(onFix, onGpsError, GEO_OPTS);
+    S.lastCb = t;
+  }
+  if (S.hi === null && !S.warnedApprox && S.badAcc >= 1000 && t - S.startedAt > 15000) {
+    S.warnedApprox = true;
+    $("road").textContent = "Location is approximate";
+    $("then").textContent = "Turn on Precise Location for this browser in Settings";
+    say("Location is approximate. Turn on precise location.");
+  }
 }
 
 /* ---- start ------------------------------------------------------------ */
-async function start() {
+let goAction = () => start(null), altAction = null, wantLock = false;
+async function start(resume) {
+  /* A double tap, or a second tap after the veil came back. One watch, one
+     listener, and no lot directions spoken halfway round the loop. */
+  if (S.started) { $("veil").style.display = "none"; return; }
   if (!navigator.geolocation) {
     $("err").textContent = "This browser has no location support.";
     return;
   }
+  S.started = true; S.startedAt = Date.now();
   voiceReady = true;
-  say("Navigation ready. " + firstDirection());
+  if (resume) {
+    S.hi = S.s = resume.hi; S.ci = resume.ci; S.resumed = true;
+    /* The window grows with time since this match, so a long stop or a
+       stretch ridden while the page was gone is still in reach. */
+    S.lastT = resume.t;
+    for (let i = 0; i < resume.ci; i++) CUES[i]._e = CUES[i]._n = CUES[i]._a = 1;
+    say("Resuming navigation");
+  } else {
+    say("Navigation ready");
+  }
+  S.lastCb = S.lastGood = Date.now();
   try {
-    if ("wakeLock" in navigator) {
-      let lock = await navigator.wakeLock.request("screen");
-      document.addEventListener("visibilitychange", async () => {
-        if (document.visibilityState === "visible")
-          try { lock = await navigator.wakeLock.request("screen"); } catch (e) {}
-      });
-    }
+    if ("wakeLock" in navigator) { wantLock = true; await navigator.wakeLock.request("screen"); }
   } catch (e) {}
-  S.watch = navigator.geolocation.watchPosition(onFix, onGpsError, {
-    enableHighAccuracy: true, maximumAge: 1000, timeout: 15000
-  });
+  S.watch = navigator.geolocation.watchPosition(onFix, onGpsError, GEO_OPTS);
+  setInterval(watchdog, 2000);
   $("veil").style.display = "none";
-  S.started = true;
   fit();
+  if (resume) { render(); updateDays(); }
 }
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState === "hidden") { saveProgress(true); return; }
+  if (!S.started) return;
+  /* Time spent locked at a stop is not a stalled feed. */
+  S.lastCb = S.lastGood = Date.now();
+  if ("speechSynthesis" in window && speechSynthesis.paused) speechSynthesis.cancel();
+  if (wantLock) try { await navigator.wakeLock.request("screen"); } catch (e) {}
+});
 function firstDirection() {
   const a = NAV.coords[0], b = NAV.coords[Math.min(12, NAV.coords.length - 1)];
   const br = (Math.atan2(
@@ -484,11 +619,31 @@ function firstDirection() {
   return "Head " + names[Math.round(br / 45) % 8] + " out of the lot.";
 }
 
-$("go").addEventListener("click", start);
+const saved = loadProgress();
+if (saved) {
+  const at = mi(saved.hi).toFixed(1), next = nextStopAfter(saved.hi);
+  $("lede").textContent = `You were at mile ${at}` + (next ? `, heading to ${next.stop}.` : ".");
+  $("go").textContent = `Resume at mile ${at}`;
+  $("alt").hidden = false;
+  goAction = () => start(saved);
+  altAction = () => start(null);
+}
+$("go").addEventListener("click", () => goAction());
+$("alt").addEventListener("click", () => altAction && altAction());
 addEventListener("resize", fit);
 setArrow("straight");
 buildDays();
 requestAnimationFrame(fit);
+
+/* Offline copy of this page. A new version takes over on the next load; if
+   one arrives before the ride starts, reload into it right away. */
+if ("serviceWorker" in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController && !S.started) location.reload();
+  });
+}
 </script>
 </body>
 </html>
