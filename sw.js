@@ -3,7 +3,7 @@
    hang on weak signal near the Round Tops. A new deploy changes VERSION, the
    browser installs this again, and the next load gets the new page.
    VERSION is the SHA-1 of the page this worker belongs to. */
-const VERSION = "ride-50696ea4a255";
+const VERSION = "ride-f5c5a03ddcef";
 /* Named by scope, so another park published beside this one keeps its copy. */
 const PREFIX = "ride " + self.registration.scope + " ";
 const CACHE = PREFIX + VERSION;
